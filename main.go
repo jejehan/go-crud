@@ -1,24 +1,23 @@
 package main
 
 import (
-	"database/sql"
 	"html/template"
 	"net/http"
 
-	"encoding/json"
-
-	"net/url"
-
-	"io/ioutil"
-
-	"encoding/xml"
+	"database/sql"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/urfave/negroni"
+
+	"encoding/json"
+	"encoding/xml"
+	"io/ioutil"
+	"net/url"
 )
 
 type Page struct {
 	Name     string
-	DbStatus bool
+	DBStatus bool
 }
 
 type SearchResult struct {
@@ -39,25 +38,49 @@ type ClassifyBookResponse struct {
 	} `xml:"recomendations>ddc>mostPopular"`
 }
 
-func main() {
+var db *sql.DB
+
+func verifyDatabase(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+	if err := db.Ping(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	next(w, r)
+}
+
+func find(id string) (ClassifyBookResponse, error) {
+	var c ClassifyBookResponse
+	body, err := classifyAPI("http://classify.oclc.org/classify2/Classify?&summary=true&owi=" + url.QueryEscape(id))
+
+	if err != nil {
+		return ClassifyBookResponse{}, nil
+	}
+
+	err = xml.Unmarshal(body, &c)
+
+	return c, err
+}
+
+/*func main() {
 	templates := template.Must(template.ParseFiles("templates/index.html"))
-	db, _ := sql.Open("sqlite3", "web.db")
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	db, _ := sql.Open("sqlite3", "dev.db")
 
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		p := Page{Name: "Gopher"}
 		if name := r.FormValue("name"); name != "" {
 			p.Name = name
 		}
-
-		p.DbStatus = db.Ping() == nil
+		p.DBStatus = db.Ping() == nil
 
 		if err := templates.ExecuteTemplate(w, "index.html", p); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
 
-	http.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
 		var results []SearchResult
 		var err error
 
@@ -71,11 +94,81 @@ func main() {
 		}
 	})
 
-	http.HandleFunc("/books/add", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/books/add", func(w http.ResponseWriter, r *http.Request) {
+		var book ClassifyBookResponse
+		var err error
 
+		if book, err = find(r.FormValue("id")); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+
+		_, err = db.Exec("insert into books (pk, title, author, id, classification) values (?, ?, ?, ?, ?)",
+			nil, book.BookData.Title, book.BookData.Author, book.BookData.ID, book.Classification.MostPopular)
+
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
 	})
 
-	http.ListenAndServe(":8080", nil)
+	n := negroni.Classic()
+	n.Use(negroni.HandlerFunc(verifyDatabase))
+	n.UseHandler(mux)
+	n.Run(":8080")
+}*/
+
+func main() {
+	templates := template.Must(template.ParseFiles("templates/index.html"))
+
+	mux := http.NewServeMux()
+
+	db, _ = sql.Open("sqlite3", "dev.db")
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		p := Page{Name: "Gopher"}
+		if name := r.FormValue("name"); name != "" {
+			p.Name = name
+		}
+		p.DBStatus = db.Ping() == nil
+
+		if err := templates.ExecuteTemplate(w, "index.html", p); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	mux.HandleFunc("/search", func(w http.ResponseWriter, r *http.Request) {
+		var results []SearchResult
+		var err error
+
+		if results, err = search(r.FormValue("search")); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+
+		encoder := json.NewEncoder(w)
+		if err := encoder.Encode(results); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	mux.HandleFunc("/books/add", func(w http.ResponseWriter, r *http.Request) {
+		var book ClassifyBookResponse
+		var err error
+
+		if book, err = find(r.FormValue("id")); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+
+		_, err = db.Exec("insert into books (pk, title, author, id, classification) values (?, ?, ?, ?, ?)",
+			nil, book.BookData.Title, book.BookData.Author, book.BookData.ID, book.Classification.MostPopular)
+
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	n := negroni.Classic()
+	n.Use(negroni.HandlerFunc(verifyDatabase))
+	n.UseHandler(mux)
+	n.Run(":8080")
 }
 
 type ClassifySearchResponse struct {
@@ -83,21 +176,25 @@ type ClassifySearchResponse struct {
 }
 
 func search(query string) ([]SearchResult, error) {
+	var c ClassifySearchResponse
+	body, err := classifyAPI("http://classify.oclc.org/classify2/Classify?&summary=true&title=" + url.QueryEscape(query))
+
+	if err != nil {
+		return []SearchResult{}, nil
+	}
+
+	err = xml.Unmarshal(body, &c)
+	return c.Results, err
+}
+
+func classifyAPI(url string) ([]byte, error) {
 	var resp *http.Response
 	var err error
 
-	if resp, err = http.Get("http://classify.oclc.org/classify2/Classify?&summary=true&title=" + url.QueryEscape(query)); err != nil {
-		return []SearchResult{}, err
+	if resp, err = http.Get(url); err != nil {
+		return []byte{}, err
 	}
 
 	defer resp.Body.Close()
-	var body []byte
-
-	if body, err = ioutil.ReadAll(resp.Body); err != nil {
-		return []SearchResult{}, err
-	}
-
-	var c ClassifySearchResponse
-	err = xml.Unmarshal(body, &c)
-	return c.Results, err
+	return ioutil.ReadAll(resp.Body)
 }
