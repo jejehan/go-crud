@@ -104,7 +104,7 @@ body
                         searchResult.append(row);
                         row.on("click", function(){
                             $.ajax({
-                                url: "/books/add?id=" + result.ID,
+                                url: "/books?id=" + result.ID,
                                 method: "PUT",
                                 success: function(data){
                                   var book = JSON.parse(data);
